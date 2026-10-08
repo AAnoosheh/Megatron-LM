@@ -693,6 +693,8 @@ def _end_otel_job_spans():
 
 
 def destroy_global_state():
+    if "megatron.training.distillation.v3_runtime" in sys.modules:
+        sys.modules["megatron.training.distillation.v3_runtime"].reset_runtime()
     destroy_global_vars()
     destroy_num_microbatches_calculator()
     destroy_global_memory_buffer()
@@ -2852,6 +2854,11 @@ def setup_model_and_optimizer(
     if args.logits_save_dir is not None and mpu.is_pipeline_last_stage():
         from megatron.training.distillation import LogitsSaverHooks
 
+        if getattr(args, "logits_save_inputs", False):
+            from megatron.training.distillation.v3_saver import PairedLogitsSaver
+
+            LogitsSaverHooks = PairedLogitsSaver
+
         logits_saver = LogitsSaverHooks(
             save_dir=args.logits_save_dir,
             k=args.logits_save_top_k,
@@ -3129,6 +3136,13 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
                                      (iteration + 1) % args.save_dgrads_interval == 0)
     while rerun_state_machine.should_run_forward_backward(data_iterator):
         # Set grad to zero.
+        if getattr(args, "logits_save_inputs", False):
+            from megatron.training.distillation.logits_saver import get_logits_saver
+
+            saver = get_logits_saver()
+            if saver is not None:
+                saver.begin_attempt()
+
         for model_chunk in model:
             model_chunk.zero_grad_buffer()
             # If saving main_grads in this iteration, then all-reduce instead of reduce-scatter.
@@ -3262,6 +3276,13 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
     if should_exit:
         return {}, True, should_checkpoint, should_exit, exit_code, None, None, 0
+
+    if getattr(args, "logits_save_inputs", False):
+        from megatron.training.distillation.logits_saver import get_logits_saver
+
+        saver = get_logits_saver()
+        if saver is not None:
+            saver.commit_attempt()
 
     # Empty unused memory.
     if args.empty_unused_memory_level >= 1:
@@ -5218,6 +5239,10 @@ def train(
     # function.
     with _otel_managed_span('checkpoint', 'megatron.checkpoint.exit_finalize', is_goodput_span=True):
         maybe_finalize_async_save(blocking=True, terminate=should_exit)
+    if getattr(args, "logits_save_inputs", False):
+        from megatron.training.distillation.v3_runtime import finish_dump
+
+        finish_dump(completed=iteration >= args.train_iters)
     ft_integration.on_checkpointing_end(is_async_finalization=True)
 
     if args.log_energy:
@@ -5666,6 +5691,11 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
 
     args = get_args()
 
+    if getattr(args, "logits_load_inputs", False):
+        from megatron.training.distillation.v3_runtime import initialize_replay
+
+        initialize_replay(args)
+
     (train_dataloader, valid_dataloaders, test_dataloader) = (None, None, None)
 
     print_rank_0('> building train, validation, and test datasets ...')
@@ -5716,6 +5746,10 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
             valid_ds = [valid_ds] if not isinstance(valid_ds, list) else valid_ds
             if args.skip_train:
                 train_dataloader = None
+            elif getattr(args, "logits_load_inputs", False):
+                from megatron.training.distillation.v3_runtime import build_replay_loader
+
+                train_dataloader = build_replay_loader(args, consumed_train_samples_in_current_phase)
             else:
                 train_dataloader = build_pretraining_data_loader(train_ds, consumed_train_samples_in_current_phase)
             valid_dataloaders = []
