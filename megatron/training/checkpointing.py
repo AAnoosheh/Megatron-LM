@@ -2524,7 +2524,13 @@ def load_checkpoint(
         # check_checkpoint_args against a checkpoint from a different run (finetune gates all of
         # those; --freeze-all-layers alone would still load the scheduler and assert on arg drift).
         args.finetune = True
-        if args.override_ckpt_iteration is None:
+        if getattr(args, 'logits_save_inputs', False):
+            # Offline KD v3: resume from what this job's range has actually published, not
+            # from the tracker, which can run ahead of a failed or interrupted flush.
+            from megatron.training.distillation.v3_runtime import frozen_resume_iteration
+
+            args.override_ckpt_iteration = frozen_resume_iteration(args)
+        elif args.override_ckpt_iteration is None:
             progress_iteration = read_frozen_resume_iteration(args.save)
             if progress_iteration > 0:
                 args.override_ckpt_iteration = progress_iteration
@@ -2916,6 +2922,9 @@ def load_checkpoint(
         skip_args = {'num_layers'} if gpt_compat_layer_maps is not None else None
         check_checkpoint_args(checkpoint_args, skip_args=skip_args)
         args.consumed_train_samples = getattr(checkpoint_args, 'consumed_train_samples', 0)
+        if getattr(args, 'logits_load_inputs', False):
+            # Offline KD v3 shuffles the same published extent on resume.
+            args.logits_load_replay_end = getattr(checkpoint_args, 'logits_load_replay_end', None)
         args.skipped_train_samples = getattr(checkpoint_args, 'skipped_train_samples', 0)
         update_num_microbatches(consumed_samples=args.consumed_train_samples, verbose=True)
         args.consumed_valid_samples = getattr(checkpoint_args, 'consumed_valid_samples', 0)

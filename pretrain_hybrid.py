@@ -183,7 +183,7 @@ def get_batch(data_iterator, vp_stage=None):
         if getattr(args, "logits_load_inputs", False) and "_kd_sample_ids" in batch:
             from megatron.training.distillation.v3_runtime import prepare_replay_batch
 
-            batch, kd_batch = prepare_replay_batch(batch, hybrid=True)
+            batch, kd_batch = prepare_replay_batch(batch)
         for key in BATCH_KEYS:
             batch[key] = (
                 batch[key].cuda(non_blocking=True)
@@ -490,6 +490,10 @@ def train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=None
         train_val_test_num_samples : A list containing the number of samples in train test and validation.
     """
     args = get_args()
+    if getattr(args, "logits_load_inputs", False):
+        from megatron.training.distillation.v3_runtime import use_hybrid_layout
+
+        use_hybrid_layout()
     if getattr(args, "logits_load_inputs", False) and args.eval_iters == 0 and not args.full_validation:
         return None, None, None
 
