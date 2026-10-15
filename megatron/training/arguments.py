@@ -1919,6 +1919,12 @@ def validate_args(args, defaults={}):
     if not args.async_save:
         args.async_strategy = "mcore"
 
+    if (args.logits_save_inputs or args.logits_load_inputs
+            or args.logits_load_shuffle_shards is not None):
+        from megatron.training.distillation.v3_runtime import validate_options
+
+        validate_options(args)
+
     if args.logits_save_dir is not None:
         assert args.async_save, (
             '--logits-save-dir requires --async-save (and --use-persistent-ckpt-worker). '
@@ -3980,6 +3986,8 @@ def _add_logits_distillation_args(parser):
     # -- Teacher saving --
     group.add_argument('--logits-save-dir', type=str, default=None,
                        help='Directory to save logits.')
+    group.add_argument('--logits-save-inputs', action='store_true',
+                       help='Write self-contained v3 caches with exact inputs and paired targets.')
     group.add_argument('--logits-save-top-k', type=int, default=128,
                        help='Number of top logits to save.')
     group.add_argument('--logits-save-top-p', type=float, default=None,
@@ -3997,13 +4005,24 @@ def _add_logits_distillation_args(parser):
     # -- Student loading --
     group.add_argument('--logits-load-dir', type=str, default=None,
                        help='Directory to load logits.')
+    group.add_argument('--logits-load-inputs', action='store_true',
+                       help='Use a v3 cache as the training dataset and KD target source.')
+    group.add_argument('--logits-load-shuffle-shards', type=int, default=None, metavar='SEED',
+                       help='Shuffle v3 teacher flush-range groups using this seed. The '
+                            'shuffled extent is fixed at the first launch and restored on '
+                            'resume.')
     group.add_argument('--logits-load-decode-threads', type=int, default=4,
                        help='Number of decode threads for cached-logits zstd '
                             'decompression and torch.load processing.')
     group.add_argument('--logits-load-msc-prefetch-depth', type=int, default=2,
                        help='For MSC/object-storage logits tar shards, number '
                             'of whole tar shards to prefetch into the MSC '
-                            'cache ahead of sequential tar consumption.')
+                            'cache ahead of sequential tar consumption. For v3 '
+                            'replay, number of decoded teacher iterations each '
+                            'teacher-DP-rank stream keeps ahead.')
+    group.add_argument('--logits-load-read-chunk-mb', type=int, default=64,
+                       help='For v3 replay from MSC/object storage, size of each '
+                            'sequential ranged read (one request per chunk).')
     group.add_argument('--logits-load-kd-loss-alpha', type=float, default=1.0,
                        help='KD loss alpha for loading logits. Total loss is calculated as '
                             'alpha * kd_loss + (1 - alpha) * lm_loss.')

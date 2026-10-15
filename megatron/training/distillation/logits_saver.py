@@ -108,7 +108,35 @@ def check_logits_saver_failure() -> None:
         )
 
 
-_MAX_VOCAB_SIZE = 2 ** 17  # 131072 - maximum supported vocab size
+def build_logits_saver(args: Any) -> "LogitsSaverHooks":
+    """Construct the teacher saver selected by the CLI (paired v3 with --logits-save-inputs)."""
+    saver_class = LogitsSaverHooks
+    if getattr(args, "logits_save_inputs", False):
+        from .v3_saver import PairedLogitsSaver
+
+        saver_class = PairedLogitsSaver
+    return saver_class(
+        save_dir=args.logits_save_dir,
+        k=args.logits_save_top_k,
+        p=args.logits_save_top_p,
+        min_k=args.logits_save_top_p_min_k,
+        save_dtype=args.logits_save_dtype,
+    )
+
+
+def begin_logits_attempt() -> None:
+    """Discard provisional saver data before a train-step attempt (rerun-safe v3 dumps)."""
+    saver = get_logits_saver()
+    if saver is not None and hasattr(saver, "begin_attempt"):
+        saver.begin_attempt()
+
+
+def commit_logits_attempt() -> None:
+    """Commit the accepted train-step attempt's saver data."""
+    saver = get_logits_saver()
+    if saver is not None and hasattr(saver, "commit_attempt"):
+        saver.commit_attempt()
+
 
 class LogitsSaverHooks:
     """
@@ -182,6 +210,8 @@ class LogitsSaverHooks:
         save_dtype: String name of the dtype for top-K log-probabilities on
             disk.  One of ``'fp16'``, ``'bf16'``, or ``'fp32'``.
     """
+
+    _max_vocab_size = 2 ** 17  # V1/V2 use 17-bit vocabulary indices.
 
     _DTYPE_MAP = {
         'fp16': torch.float16,
@@ -506,8 +536,9 @@ class LogitsSaverHooks:
         local_vocab_size = logits.shape[-1]
         global_vocab_size = local_vocab_size * self.tp_size
 
-        assert global_vocab_size <= _MAX_VOCAB_SIZE, (
-            f"Global vocab size {global_vocab_size} exceeds maximum supported {_MAX_VOCAB_SIZE} (17 bits)"
+        max_vocab_size = self._max_vocab_size
+        assert global_vocab_size <= max_vocab_size, (
+            f"Global vocab size {global_vocab_size} exceeds maximum supported {max_vocab_size}"
         )
 
         effective_k = min(self.k, global_vocab_size)
@@ -629,8 +660,8 @@ class LogitsSaverHooks:
         global_indices = local_indices + vocab_offset
 
         # Pack logits, log-probs, and indices into a single tensor.
-        # fp32 can exactly represent integers up to 2^24, sufficient for
-        # 17-bit vocab indices.  Shape: (seq, batch, local_k, 3)
+        # fp32 exactly represents integers through 2^24, covering all supported
+        # vocabularies. Shape: (seq, batch, local_k, 3)
         combined = torch.stack(
             [local_logit_vals,
              local_logprob_vals.float(),

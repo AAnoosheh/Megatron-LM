@@ -151,6 +151,10 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     batch = {}
     if tp_rank == 0:
         batch = next(data_iterator)
+        if getattr(args, "logits_save_inputs", False) or getattr(args, "logits_load_inputs", False):
+            from megatron.training.distillation.v3_runtime import on_tp0_batch
+
+            batch = on_tp0_batch(batch, hybrid=False, vp_stage=vp_stage)
         for key in BATCH_KEYS:
             batch[key] = (
                 batch[key].cuda(non_blocking=True)
@@ -206,6 +210,10 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     # BATCH_KEYS entry on tp_rank 0; other tp_ranks receive a fresh dict from
     # get_batch_on_this_tp_rank. BATCH_KEYS is already alphabetical, matching
     # the historical sorted(batch.keys()) order.
+    if getattr(args, "logits_load_inputs", False):
+        from megatron.training.distillation.v3_runtime import stage_targets
+
+        stage_targets(vp_stage=vp_stage)
     return [batch[key] for key in BATCH_KEYS]
 
 
@@ -240,7 +248,8 @@ def _build_cached_logits_loss_func(
 
 
 def loss_func(
-    loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optional[GPTModel] = None
+    loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optional[GPTModel] = None,
+    kd_batch=None,
 ):
     """Loss function.
 
@@ -257,7 +266,11 @@ def loss_func(
     """
     args = get_args()
 
-    if args.logits_load_dir is not None:
+    if getattr(args, "logits_load_inputs", False):
+        from megatron.training.distillation.v3_loss import paired_loss
+
+        loss, num_tokens, report = paired_loss(loss_mask, output_tensor, model, kd_batch)
+    elif args.logits_load_dir is not None:
         # Offline knowledge distillation loss using cached teacher log-probabilities.
         loss_func_cached_logits = _build_cached_logits_loss_func(
             logprobs_dir=args.logits_load_dir,
@@ -428,8 +441,14 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
                 padding_mask=padding_mask,
             )
 
+    kd_batch = None
+    if getattr(args, "logits_load_inputs", False):
+        from megatron.training.distillation.v3_runtime import take_targets
+
+        kd_batch = take_targets()
+
     # [ModelOpt]: model is needed to access ModelOpt distillation losses
-    return output_tensor, partial(loss_func, loss_mask, model=model)
+    return output_tensor, partial(loss_func, loss_mask, model=model, kd_batch=kd_batch)
 
 
 def is_dataset_built_on_rank(vp_stage=None, is_packed_sequence=False):
@@ -526,7 +545,14 @@ def train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=None
     """
     args = get_args()
 
+    if getattr(args, "logits_load_inputs", False) and args.eval_iters == 0 and not args.full_validation:
+        return None, None, None
+
     config = core_gpt_dataset_config_from_args(args)
+    if getattr(args, "logits_load_inputs", False):
+        from megatron.training.distillation.v3_runtime import validation_only_config
+
+        train_val_test_num_samples = validation_only_config(config, train_val_test_num_samples)
 
     is_packed_sequence = False
     if args.sft:

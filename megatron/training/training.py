@@ -693,6 +693,8 @@ def _end_otel_job_spans():
 
 
 def destroy_global_state():
+    if "megatron.training.distillation.v3_runtime" in sys.modules:
+        sys.modules["megatron.training.distillation.v3_runtime"].reset_runtime()
     destroy_global_vars()
     destroy_num_microbatches_calculator()
     destroy_global_memory_buffer()
@@ -2850,15 +2852,9 @@ def setup_model_and_optimizer(
         )
 
     if args.logits_save_dir is not None and mpu.is_pipeline_last_stage():
-        from megatron.training.distillation import LogitsSaverHooks
+        from megatron.training.distillation import build_logits_saver
 
-        logits_saver = LogitsSaverHooks(
-            save_dir=args.logits_save_dir,
-            k=args.logits_save_top_k,
-            p=args.logits_save_top_p,
-            min_k=args.logits_save_top_p_min_k,
-            save_dtype=args.logits_save_dtype,
-        )
+        logits_saver = build_logits_saver(args)
         logits_saver.attach_hooks(unwrapped_model[-1])
 
     if args.logits_load_dir is not None and mpu.is_pipeline_last_stage():
@@ -3128,6 +3124,10 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     save_dgrads_in_this_iteration = (args.save_dgrads_interval is not None and
                                      (iteration + 1) % args.save_dgrads_interval == 0)
     while rerun_state_machine.should_run_forward_backward(data_iterator):
+        if args.logits_save_dir is not None:
+            from megatron.training.distillation import begin_logits_attempt
+
+            begin_logits_attempt()
         # Set grad to zero.
         for model_chunk in model:
             model_chunk.zero_grad_buffer()
@@ -3262,6 +3262,11 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
     if should_exit:
         return {}, True, should_checkpoint, should_exit, exit_code, None, None, 0
+
+    if args.logits_save_dir is not None:
+        from megatron.training.distillation import commit_logits_attempt
+
+        commit_logits_attempt()
 
     # Empty unused memory.
     if args.empty_unused_memory_level >= 1:
@@ -4796,6 +4801,14 @@ def train(
         num_microbatches = get_num_microbatches()
         update_num_microbatches(args.consumed_train_samples, consistency_check=True, verbose=True)
 
+        # Offline KD v3: agree on the replay frontier, or stop a completed dump range.
+        if getattr(args, "logits_load_inputs", False) or getattr(args, "logits_save_inputs", False):
+            from megatron.training.distillation.v3_runtime import before_train_step
+
+            if before_train_step(args):
+                should_exit = True
+                break
+
         # Capture CUDA Graphs. One-off, at the warmup-step boundary -- the actual
         # graph capture (create_cudagraphs) is a notable one-time cost worth its
         # own span, distinct from the megatron.train.iteration spans around it.
@@ -5218,6 +5231,10 @@ def train(
     # function.
     with _otel_managed_span('checkpoint', 'megatron.checkpoint.exit_finalize', is_goodput_span=True):
         maybe_finalize_async_save(blocking=True, terminate=should_exit)
+    if getattr(args, "logits_save_inputs", False):
+        from megatron.training.distillation.v3_runtime import finish_dump
+
+        finish_dump()
     ft_integration.on_checkpointing_end(is_async_finalization=True)
 
     if args.log_energy:
@@ -5716,6 +5733,10 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
             valid_ds = [valid_ds] if not isinstance(valid_ds, list) else valid_ds
             if args.skip_train:
                 train_dataloader = None
+            elif getattr(args, "logits_load_inputs", False):
+                from megatron.training.distillation.v3_runtime import build_replay_loader
+
+                train_dataloader = build_replay_loader(args, consumed_train_samples_in_current_phase)
             else:
                 train_dataloader = build_pretraining_data_loader(train_ds, consumed_train_samples_in_current_phase)
             valid_dataloaders = []
