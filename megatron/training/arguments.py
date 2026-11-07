@@ -1919,7 +1919,7 @@ def validate_args(args, defaults={}):
     if not args.async_save:
         args.async_strategy = "mcore"
 
-    if (args.logits_save_inputs or args.logits_load_inputs
+    if (args.logits_save_inputs or args.logits_load_inputs or args.kd_corpus_dump
             or args.logits_load_shuffle_shards is not None):
         from megatron.training.distillation.v3_runtime import validate_options
 
@@ -4007,6 +4007,13 @@ def _add_logits_distillation_args(parser):
                        help='Directory to load logits.')
     group.add_argument('--logits-load-inputs', action='store_true',
                        help='Use a v3 cache as the training dataset and KD target source.')
+    group.add_argument('--kd-corpus-dump', type=str, default=None, metavar='SOURCE',
+                       help='Dump a v3 corpus source: score exactly one shuffled epoch of the '
+                            'single --data-path dataset with a frozen teacher, into '
+                            '<--logits-save-dir>/SOURCE/<--kd-corpus-split>/. The run sizes '
+                            'itself to the epoch; --train-iters is ignored.')
+    group.add_argument('--kd-corpus-split', type=str, default='train', choices=['train', 'valid'],
+                       help='Which --split part a corpus dump scores.')
     group.add_argument('--logits-load-shuffle-shards', type=int, default=None, metavar='SEED',
                        help='Shuffle v3 teacher flush-range groups using this seed. The '
                             'shuffled extent is fixed at the first launch and restored on '

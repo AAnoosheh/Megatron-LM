@@ -5729,7 +5729,16 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
 
         else:
             # Build datasets.
-            train_ds, valid_ds, test_ds = build_train_valid_test_datasets(build_train_valid_test_datasets_provider)
+            if getattr(args, "kd_corpus_dump", None):
+                from megatron.training.distillation.corpus_runtime import build_corpus_dump_datasets
+
+                train_ds, valid_ds, test_ds = build_corpus_dump_datasets(
+                    args, build_train_valid_test_datasets_provider
+                )
+            else:
+                train_ds, valid_ds, test_ds = build_train_valid_test_datasets(
+                    build_train_valid_test_datasets_provider
+                )
             valid_ds = [valid_ds] if not isinstance(valid_ds, list) else valid_ds
             if args.skip_train:
                 train_dataloader = None
@@ -5761,6 +5770,11 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
         )
     else:
         flags = torch.tensor([0, 0, 0], dtype=torch.long, device='cuda')
+
+    if getattr(args, "kd_corpus_dump", None):
+        from megatron.training.distillation.corpus_runtime import agree_corpus_epoch
+
+        agree_corpus_epoch(args)  # Every rank sizes the run to the source's epoch.
 
     torch.distributed.broadcast(flags, 0)
 
