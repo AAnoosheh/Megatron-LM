@@ -2925,6 +2925,8 @@ def load_checkpoint(
         if getattr(args, 'logits_load_inputs', False):
             # Offline KD v3 shuffles the same published extent on resume.
             args.logits_load_replay_end = getattr(checkpoint_args, 'logits_load_replay_end', None)
+            # A corpus blend must plan the same schedule on resume.
+            args.kd_corpus_manifest_hash = getattr(checkpoint_args, 'kd_corpus_manifest_hash', None)
         args.skipped_train_samples = getattr(checkpoint_args, 'skipped_train_samples', 0)
         update_num_microbatches(consumed_samples=args.consumed_train_samples, verbose=True)
         args.consumed_valid_samples = getattr(checkpoint_args, 'consumed_valid_samples', 0)
